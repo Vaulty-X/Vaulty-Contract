@@ -16,6 +16,3 @@ edition = "2021"
 [workspace.dependencies]
 soroban-sdk = "20.5.0"
 shared = { path = "shared" }
-
-[patch.crates-io]
-ethnum = { path = "./ethnum-patch" }

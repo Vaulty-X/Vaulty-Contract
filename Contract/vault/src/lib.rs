@@ -310,11 +310,6 @@ impl VaultContract {
         StorageHelper::touch_vault(&env, &balances_key);
 
         env.events().publish(
-            (vault_id.0.clone(), from, amount),
-            (DepositMade {
-                vault_id: vault_id.0.clone(),
-                depositor: from,
-                asset: metadata.asset.symbol,
             (DepositMade::topic(&env), vault_id.0.clone()),
             DepositMade {
                 vault_id: vault_id.0,

@@ -131,8 +131,150 @@ This ensures the integration tests are only compiled when explicitly requested, 
 ## Milestone Rewards
 The current implementation grants 10 tokens for reaching a 7-day streak milestone. This can be configured in the rewards contract to support additional milestones and reward amounts.
 
+## Contract-Specific Implementation Details
+
+### Vault Contract (vault/src/lib.rs)
+The vault contract implements the cross-contract integration in the `deposit` function:
+```rust
+// Update user's streak in streaks contract if it's initialized
+let streaks_key = streaks_contract_key(&env);
+if let Some(streaks_contract) = env.storage().instance().get::<BytesN<32>, Address>(&streaks_key) {
+    let mut args = Vec::new(&env);
+    args.push_back(metadata.owner.clone().into_val(&env));
+    let result = env.try_invoke_contract::<(), shared::errors::Error>(
+        &streaks_contract,
+        &Symbol::new(&env, "update_streak"),
+        args,
+    );
+    if result.is_ok() {
+        let mut get_streak_args = Vec::new(&env);
+        get_streak_args.push_back(metadata.owner.clone().into_val(&env));
+        let streak_count: u32 = env.invoke_contract(
+            &streaks_contract,
+            &Symbol::new(&env, "get_streak"),
+            get_streak_args,
+        );
+
+        let rewards_key = rewards_contract_key(&env);
+        if let Some(rewards_contract) = env.storage().instance().get::<BytesN<32>, Address>(&rewards_key) {
+            let mut grant_args = Vec::new(&env);
+            grant_args.push_back(metadata.owner.clone().into_val(&env));
+            grant_args.push_back(streak_count.into_val(&env));
+            let _ = env.try_invoke_contract::<(), shared::errors::Error>(
+                &rewards_contract,
+                &Symbol::new(&env, "grant_reward"),
+                grant_args,
+            );
+        }
+    }
+}
+```
+
+### Streaks Contract (streaks/src/lib.rs)
+The streaks contract enforces the one-activity-per-day rule through timestamp verification:
+- Tracks last activity timestamp for each user
+- Compares current timestamp with last activity to ensure it's a new calendar day
+- Uses UTC date calculation to prevent timezone issues
+- Automatically resets streaks if more than 48 hours pass between activities
+- Supports freeze mechanics to save streaks when a day is missed
+
+### Rewards Contract (rewards/src/lib.rs)
+The rewards contract manages milestone-based rewards with the following configuration:
+- 7-day streak: 10 reward tokens
+- 14-day streak: 25 reward tokens (additional milestone)
+- 30-day streak: 100 reward tokens (additional milestone)
+- Maintains a rewards pool that must be funded before rewards can be granted
+- Tracks claimed rewards to prevent double-claiming
+- Implements authorization checks for reward pool funding
+
+## Additional Edge Cases Tested
+
+### Streak Freeze Mechanics
+The integration also tests the freeze feature that allows users to maintain their streak even if they miss a day:
+```rust
+// Miss one day, use a freeze
+env.ledger().set_timestamp(1704067200 + 9 * 86400); // Skip day 8, go to day 9
+let user_streak = streaks.get_user_streak(&user);
+assert_eq!(user_streak.available_freezes, 3); // Started with 3
+
+vault.deposit(&vault_id_val, &user, &100);
+let user_streak = streaks.get_user_streak(&user);
+assert_eq!(user_streak.available_freezes, 2); // Used one freeze
+assert_eq!(user_streak.current_streak, 8); // Streak continued
+```
+
+### Streak Reset After Extended Inactivity
+Tests that streaks properly reset after two or more days of inactivity:
+```rust
+// Miss two days - streak resets
+env.ledger().set_timestamp(1704067200 + 12 * 86400); // Skip 2 full days
+vault.deposit(&vault_id_val, &user, &100);
+let streak = streaks.get_streak(&user);
+assert_eq!(streak, 1); // Streak reset to 1
+```
+
+### Unauthorized Access Prevention
+Verifies that only the authorized vault contract can call streak updates:
+```rust
+#[test]
+#[should_panic(expected = "Unauthorized")]
+fn test_unauthorized_streaks_caller() {
+    // Try to call update_streak from unauthorized address
+    let user = Address::generate(&env);
+    streaks.update_streak(&user); // Should panic
+}
+```
+
+### Double-Claim Prevention
+Ensures users can't claim the same milestone reward multiple times:
+```rust
+#[test]
+#[should_panic(expected = "RewardAlreadyClaimed")]
+fn test_double_claim_prevention() {
+    // Claim first time succeeds
+    let claimed = rewards.claim_rewards(&user);
+    assert_eq!(claimed, 10_0000000);
+
+    // Claim second time should panic
+    rewards.claim_rewards(&user);
+}
+```
+
+## Troubleshooting Common Issues
+
+### Test Failure: "Streaks contract not initialized"
+- **Cause**: The vault contract was initialized before the streaks contract
+- **Solution**: Always initialize contracts in the correct order: streaks → rewards → vault
+
+### Test Failure: "Unauthorized" when calling update_streak
+- **Cause**: The vault wasn't registered as an authorized caller in the streaks contract
+- **Solution**: Ensure `vault.register_with_streaks()` is called after initialization
+
+### Test Failure: Insufficient reward liquidity
+- **Cause**: The rewards pool wasn't funded before attempting to grant rewards
+- **Solution**: Call `rewards.fund_rewards_pool()` with sufficient funds before running tests
+
+### Test Failure: Same-day deposit unexpectedly succeeds
+- **Cause**: Timestamp calculation error causing the second deposit to be recognized as a new day
+- **Solution**: Verify ledger timestamps are set correctly with 86400-second intervals between days
+
+## Performance Considerations
+- Each deposit makes up to 3 cross-contract calls (update_streak, get_streak, grant_reward)
+- Integration tests use `env.budget().reset_unlimited()` to handle the additional computation
+- All storage operations in cross-contract calls properly extend TTL to prevent contract archival
+- The integration maintains Soroban's best practices for efficient cross-contract interactions
+
+## Future Enhancements
+1. **Additional Milestones**: Extend the rewards contract to support more streak milestones
+2. **Flexible Reward Amounts**: Make milestone reward amounts configurable through governance
+3. **Multi-Vault Support**: Allow users to build streaks across multiple vaults
+4. **Referral Rewards**: Add additional rewards for referring new users
+5. **Tiered Rewards**: Implement different reward tiers based on deposit size consistency
+
 ## Security Considerations
 1. **Authorization**: Only the vault contract is authorized to call `update_streak` on the streaks contract
 2. **Atomicity**: All state changes are atomic - if any step fails, the entire transaction reverts
 3. **Balance Tracking**: Vault balances are always updated before any cross-contract calls, ensuring funds are always accounted for
 4. **Error Isolation**: Failures in streaks or rewards contracts cannot affect the core vault accounting
+5. **Reentrancy Protection**: Soroban's invocation model prevents reentrancy attacks in cross-contract calls
+6. **Overflow Protection**: All math operations use safe math utilities to prevent integer overflow

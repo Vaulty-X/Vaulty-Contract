@@ -5,6 +5,7 @@ edition.workspace = true
 
 [features]
 testutils = ["soroban-sdk/testutils"]
+integration_tests = []
 
 [dependencies]
 soroban-sdk.workspace = true

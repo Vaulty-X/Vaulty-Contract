@@ -11,3 +11,6 @@ shared.workspace = true
 soroban-sdk = { workspace = true, features = ["testutils"] }
 streaks = { path = "../streaks" }
 rewards = { path = "../rewards" }
+
+[features]
+integration_tests = []
